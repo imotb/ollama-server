@@ -4,6 +4,7 @@
 # Ollama Stack Installer (Ollama + WebUI + Traefik + Dozzle)
 # Optimized for Ubuntu 22.04
 # Auth method: OpenSSL (No apache2-utils dependency)
+# Features: IP Whitelist for API, SSL, Monitoring
 # =============================================================================
 
 # Colors for output
@@ -14,12 +15,16 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Global Variables for API Restriction
+API_RESTRICT_ENABLED="false"
+API_ALLOWED_IP=""
+
 # Helper Functions
 print_banner() {
     echo -e "${CYAN}"
     echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║   Ollama Stack Installer (Ollama + WebUI + Traefik)      ║"
-    echo "║                  with Dozzle Monitoring                  ║"
+    echo "║   Ollama Stack Installer (Ollama + WebUI + Traefik)     ║"
+    echo "║                  with Dozzle Monitoring                 ║"
     echo "╚══════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -94,6 +99,37 @@ get_user_input() {
     fi
 }
 
+configure_security() {
+    if command -v ufw &> /dev/null; then
+        echo -e "${YELLOW}UFW firewall detected.${NC}"
+        read -p "Do you want to allow ports 80, 443, and 8080 in UFW? (y/n): " FW_CONFIRM
+        if [[ "$FW_CONFIRM" == "y" || "$FW_CONFIRM" == "Y" ]]; then
+            ufw allow 80/tcp comment 'Traefik Web'
+            ufw allow 443/tcp comment 'Traefik WebSecure'
+            ufw allow 8080/tcp comment 'Traefik Dashboard Direct'
+            echo -e "${GREEN}✓ Firewall rules updated.${NC}"
+            echo -e "${YELLOW}Note: If UFW is inactive, run 'sudo ufw enable' to activate it.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}UFW not found. Skipping firewall configuration.${NC}"
+    fi
+
+    echo -e "${BLUE}API Security Configuration${NC}"
+    read -p "Do you want to restrict API access ($API_DOMAIN) to a specific IP? (y/n): " API_RESTRICT_CONFIRM
+    if [[ "$API_RESTRICT_CONFIRM" == "y" || "$API_RESTRICT_CONFIRM" == "Y" ]]; then
+        read -p "Enter the allowed IP address (e.g., 1.2.3.4): " API_ALLOWED_IP
+        # Simple IP validation (IPv4)
+        if [[ "$API_ALLOWED_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            API_RESTRICT_ENABLED="true"
+            echo -e "${GREEN}✓ API will be restricted to ${CYAN}$API_ALLOWED_IP${NC}"
+        else
+            echo -e "${RED}Invalid IP format. Skipping restriction.${NC}"
+            API_RESTRICT_ENABLED="false"
+            API_ALLOWED_IP=""
+        fi
+    fi
+}
+
 generate_auth() {
     echo -e "${YELLOW}Generating Secure Credentials (OpenSSL Method)...${NC}"
     
@@ -110,22 +146,6 @@ generate_auth() {
     DOZZLE_AUTH="${DOZZLE_USER}:${DOZZLE_HASH}"
     
     echo -e "${GREEN}✓ Credentials generated successfully.${NC}"
-}
-
-configure_firewall() {
-    if command -v ufw &> /dev/null; then
-        echo -e "${YELLOW}UFW firewall detected.${NC}"
-        read -p "Do you want to allow ports 80, 443, and 8080 in UFW? (y/n): " FW_CONFIRM
-        if [[ "$FW_CONFIRM" == "y" || "$FW_CONFIRM" == "Y" ]]; then
-            ufw allow 80/tcp comment 'Traefik Web'
-            ufw allow 443/tcp comment 'Traefik WebSecure'
-            ufw allow 8080/tcp comment 'Traefik Dashboard Direct'
-            echo -e "${GREEN}✓ Firewall rules updated.${NC}"
-            echo -e "${YELLOW}Note: If UFW is inactive, run 'sudo ufw enable' to activate it.${NC}"
-        fi
-    else
-        echo -e "${YELLOW}UFW not found. Skipping firewall configuration.${NC}"
-    fi
 }
 
 create_project_structure() {
@@ -154,6 +174,15 @@ EOF
 }
 
 create_docker_compose() {
+    # Prepare Middleware Labels based on user choice
+    if [ "$API_RESTRICT_ENABLED" = "true" ]; then
+        TRAEFIK_MIDDLEWARE_IP="      - \"traefik.http.middlewares.api-ipwhitelist.ipallowlist.sourcerange=\${API_ALLOWED_IP}\""
+        OLLAMA_MIDDLEWARE_IP="      - \"traefik.http.routers.ollama.middlewares=api-ipwhitelist\""
+    else
+        TRAEFIK_MIDDLEWARE_IP="# API IP Restriction Disabled"
+        OLLAMA_MIDDLEWARE_IP="# No IP restriction for API"
+    fi
+
     cat > docker-compose.yml << EOF
 services:
   traefik:
@@ -184,6 +213,9 @@ services:
       # Traefik Dashboard Auth Middleware
       - "traefik.http.middlewares.traefik-auth.basicauth.users=\${TRAEFIK_AUTH}"
       
+      # API IP Whitelist Middleware (Defined here, used by Ollama)
+ ${TRAEFIK_MIDDLEWARE_IP}
+      
       # Traefik Dashboard Configuration
       - "traefik.enable=true"
       - "traefik.http.routers.dashboard.rule=Host(\`\${TRAEFIK_DOMAIN}\`)"
@@ -210,6 +242,8 @@ services:
       - traefik.http.routers.ollama.entrypoints=websecure
       - traefik.http.routers.ollama.tls.certresolver=myresolver
       - traefik.http.services.ollama.loadbalancer.server.port=11434
+      # Apply IP Whitelist to API if enabled
+ ${OLLAMA_MIDDLEWARE_IP}
 
   openwebui:
     image: ghcr.io/open-webui/open-webui:main
@@ -307,6 +341,13 @@ show_info() {
     echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
     echo -e "Dashboard (OpenWebUI) : ${CYAN}https://${MAIN_DOMAIN}${NC}"
     echo -e "API (Ollama)           : ${CYAN}https://${API_DOMAIN}${NC}"
+    
+    if [ "$API_RESTRICT_ENABLED" = "true" ]; then
+        echo -e "                        ${RED}[Restricted to IP: ${API_ALLOWED_IP}]${NC}"
+    else
+        echo -e "                        ${GREEN}[Public Access]${NC}"
+    fi
+
     echo -e "Monitoring (Dozzle)    : ${CYAN}https://${MONITOR_DOMAIN}${NC}"
     echo -e "Traefik Dashboard     : ${CYAN}https://${TRAEFIK_DOMAIN}${NC}"
     echo -e "${YELLOW}----------------------------------------${NC}"
@@ -329,8 +370,8 @@ check_root
 print_banner
 install_docker
 get_user_input
+configure_security # This now contains UFW and IP Restriction logic
 generate_auth
-configure_firewall
 create_project_structure
 create_env_file
 create_docker_compose
