@@ -23,8 +23,8 @@ API_ALLOWED_IP=""
 print_banner() {
     echo -e "${CYAN}"
     echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║   Ollama Stack Installer (Ollama + WebUI + Traefik)     ║"
-    echo "║                  with Dozzle Monitoring                 ║"
+    echo "║   Ollama Stack Installer (Ollama + WebUI + Traefik)      ║"
+    echo "║                  with Dozzle Monitoring                  ║"
     echo "╚══════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -169,18 +169,23 @@ EMAIL=$EMAIL
 TRAEFIK_AUTH=$TRAEFIK_AUTH
 DOZZLE_AUTH=$DOZZLE_AUTH
 OLLAMA_HOST=0.0.0.0
+API_ALLOWED_IP=$API_ALLOWED_IP
 EOF
     echo -e "${GREEN}✓ .env file created.${NC}"
 }
 
 create_docker_compose() {
-    # Prepare Middleware Labels based on user choice
+    # Prepare label content strings (without leading spaces/dashes)
+    API_IP_CONTENT="traefik.http.middlewares.api-ipwhitelist.ipallowlist.sourcerange=\${API_ALLOWED_IP}"
+    OLLAMA_MW_CONTENT="traefik.http.routers.ollama.middlewares=api-ipwhitelist"
+
     if [ "$API_RESTRICT_ENABLED" = "true" ]; then
-        TRAEFIK_MIDDLEWARE_IP="      - \"traefik.http.middlewares.api-ipwhitelist.ipallowlist.sourcerange=\${API_ALLOWED_IP}\""
-        OLLAMA_MIDDLEWARE_IP="      - \"traefik.http.routers.ollama.middlewares=api-ipwhitelist\""
+        # Create lines with exactly 6 spaces indent to match YAML structure
+        LINE_IP_WHITELIST="     - \"${API_IP_CONTENT}\""
+        LINE_OLLAMA_MW="     - \"${OLLAMA_MW_CONTENT}\""
     else
-        TRAEFIK_MIDDLEWARE_IP="# API IP Restriction Disabled"
-        OLLAMA_MIDDLEWARE_IP="# No IP restriction for API"
+        LINE_IP_WHITELIST="      # API IP Restriction Disabled"
+        LINE_OLLAMA_MW="      # No IP restriction for API"
     fi
 
     cat > docker-compose.yml << EOF
@@ -212,10 +217,8 @@ services:
     labels:
       # Traefik Dashboard Auth Middleware
       - "traefik.http.middlewares.traefik-auth.basicauth.users=\${TRAEFIK_AUTH}"
-      
       # API IP Whitelist Middleware (Defined here, used by Ollama)
- ${TRAEFIK_MIDDLEWARE_IP}
-      
+ ${LINE_IP_WHITELIST}
       # Traefik Dashboard Configuration
       - "traefik.enable=true"
       - "traefik.http.routers.dashboard.rule=Host(\`\${TRAEFIK_DOMAIN}\`)"
@@ -243,7 +246,7 @@ services:
       - traefik.http.routers.ollama.tls.certresolver=myresolver
       - traefik.http.services.ollama.loadbalancer.server.port=11434
       # Apply IP Whitelist to API if enabled
- ${OLLAMA_MIDDLEWARE_IP}
+ ${LINE_OLLAMA_MW}
 
   openwebui:
     image: ghcr.io/open-webui/open-webui:main
@@ -276,7 +279,6 @@ services:
       - traefik.enable=true
       # Dozzle Auth Middleware (Separate from Traefik)
       - "traefik.http.middlewares.dozzle-auth.basicauth.users=\${DOZZLE_AUTH}"
-      
       # Dozzle Configuration
       - "traefik.http.routers.dozzle.rule=Host(\`\${MONITOR_DOMAIN}\`)"
       - "traefik.http.routers.dozzle.entrypoints=websecure"
@@ -300,6 +302,12 @@ run_containers() {
     echo -e "${YELLOW}Starting Docker Compose...${NC}"
     docker network create traefik-net 2>/dev/null || true
     docker compose up -d
+    
+    # Check exit code to ensure containers actually started
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}✗ Failed to start containers. Check the logs above or run 'docker compose logs' manually.${NC}"
+        exit 1
+    fi
     echo -e "${GREEN}✓ Containers started successfully.${NC}"
 }
 
