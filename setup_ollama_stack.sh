@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # =============================================================================
 # Ollama Stack Installer (Ollama + WebUI + Traefik + Dozzle)
@@ -77,6 +78,7 @@ get_user_input() {
     TRAEFIK_DOMAIN=${TRAEFIK_DOMAIN:-$DEFAULT_TRAEFIK}
 
     # 5. Email for SSL
+    EMAIL=""
     while [[ ! "$EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; do
         read -p "Your email for Let's Encrypt (SSL): " EMAIL
         if [[ ! "$EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
@@ -104,9 +106,9 @@ configure_security() {
         echo -e "${YELLOW}UFW firewall detected.${NC}"
         read -p "Do you want to allow ports 80, 443, and 8080 in UFW? (y/n): " FW_CONFIRM
         if [[ "$FW_CONFIRM" == "y" || "$FW_CONFIRM" == "Y" ]]; then
-            ufw allow 80/tcp comment 'Traefik Web'
-            ufw allow 443/tcp comment 'Traefik WebSecure'
-            ufw allow 8080/tcp comment 'Traefik Dashboard Direct'
+            ufw allow 80/tcp comment 'Traefik Web' || echo -e "${YELLOW}Warning: could not add UFW rule for port 80.${NC}"
+            ufw allow 443/tcp comment 'Traefik WebSecure' || echo -e "${YELLOW}Warning: could not add UFW rule for port 443.${NC}"
+            ufw allow 8080/tcp comment 'Traefik Dashboard Direct' || echo -e "${YELLOW}Warning: could not add UFW rule for port 8080.${NC}"
             echo -e "${GREEN}✓ Firewall rules updated.${NC}"
             echo -e "${YELLOW}Note: If UFW is inactive, run 'sudo ufw enable' to activate it.${NC}"
         fi
@@ -151,11 +153,16 @@ generate_auth() {
 create_project_structure() {
     DIR="ollama-stack"
     if [ -d "$DIR" ]; then
-        echo -e "${YELLOW}Directory '$DIR' already exists. Cleaning up old files...${NC}"
+        echo -e "${YELLOW}Directory '$DIR' already exists.${NC}"
+        read -p "Remove and recreate it? All existing files will be deleted. (y/n): " RECREATE
+        if [[ "$RECREATE" != "y" && "$RECREATE" != "Y" ]]; then
+            echo -e "${RED}Operation cancelled by user.${NC}"
+            exit 0
+        fi
         rm -rf "$DIR"
     fi
     mkdir -p "$DIR"
-    cd "$DIR"
+    cd "$DIR" || { echo -e "${RED}Failed to enter directory '$DIR'. Aborting.${NC}"; exit 1; }
     echo -e "${GREEN}✓ Project directory created.${NC}"
 }
 
@@ -293,7 +300,6 @@ networks:
 volumes:
   ollama:
   openwebui:
-  letsencrypt:
 EOF
     echo -e "${GREEN}✓ docker-compose.yml created.${NC}"
 }
@@ -301,10 +307,7 @@ EOF
 run_containers() {
     echo -e "${YELLOW}Starting Docker Compose...${NC}"
     docker network create traefik-net 2>/dev/null || true
-    docker compose up -d
-    
-    # Check exit code to ensure containers actually started
-    if [ $? -ne 0 ]; then
+    if ! docker compose up -d; then
         echo -e "${RED}✗ Failed to start containers. Check the logs above or run 'docker compose logs' manually.${NC}"
         exit 1
     fi
@@ -320,23 +323,22 @@ install_model() {
     echo "3) gpt-oss:20b"
     echo "4) Skip model installation"
     echo -e "${BLUE}----------------------------------------${NC}"
-    read -p "Enter choice (1-4): " MODEL_CHOICE
+    read -p "Enter choice (1-4): " MODEL_CHOICE || MODEL_CHOICE=""
 
-    case $MODEL_CHOICE in
+    case "${MODEL_CHOICE}" in
         1) MODEL_NAME="deepseek-r1:8b" ;;
         2) MODEL_NAME="ministral-3:8b" ;;
         3) MODEL_NAME="gpt-oss:20b" ;;
-        *) 
+        *)
             echo -e "${YELLOW}Skipping model installation.${NC}"
             MODEL_NAME=""
             ;;
     esac
 
-    if [ -n "$MODEL_NAME" ]; then
-        echo -e "${YELLOW}Pulling $MODEL_NAME... (This may take a few minutes)${NC}"
-        docker exec -it ollama ollama pull $MODEL_NAME
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}✓ Model $MODEL_NAME installed successfully.${NC}"
+    if [ -n "${MODEL_NAME}" ]; then
+        echo -e "${YELLOW}Pulling ${MODEL_NAME}... (This may take a few minutes)${NC}"
+        if docker exec -it ollama ollama pull "${MODEL_NAME}"; then
+            echo -e "${GREEN}✓ Model ${MODEL_NAME} installed successfully.${NC}"
         else
             echo -e "${RED}✗ Failed to install model. Check logs later.${NC}"
         fi
